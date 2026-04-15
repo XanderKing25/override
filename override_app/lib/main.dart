@@ -67,6 +67,7 @@ class _GestorPantallasState extends State<GestorPantallas> {
   // Fases Locales Visuales (Caja Central)
   String _interfazLocal = "base";
   String _tempObjetivo = "";
+  Map<String, dynamic>? _resultadoPendiente;
 
   // Identidades del juego
   final Map<String, String> _nombresCartas = {
@@ -98,12 +99,17 @@ class _GestorPantallasState extends State<GestorPantallas> {
       _acusado = gs['acusado'] ?? "";
       _haAtacado = gs['ha_atacado'] ?? false;
 
-      // Auto-Reset a tapete inicial con cada sync de estado, excepto si estamos nosotros haciendo UI local en APUESTAS
-      if (_estadoSala != "APUESTAS" ||
-          (_estadoSala == "APUESTAS" &&
-              !(_interfazLocal.startsWith("ataque_") ||
-                  _interfazLocal == "acusar"))) {
+      // Reset al tapete base siempre que no estemos en plena selección local
+      if (!(_interfazLocal.startsWith("ataque_") ||
+          _interfazLocal == "acusar")) {
         _interfazLocal = "base";
+      }
+    }
+    // Capturar resultado de fin de ronda
+    if (data.containsKey('resultado') && data['resultado'] != null) {
+      final r = data['resultado'] as Map<String, dynamic>;
+      if (r['tipo'] != null && r['tipo'] != 'eliminado') {
+        _resultadoPendiente = r;
       }
     }
   }
@@ -164,11 +170,74 @@ class _GestorPantallasState extends State<GestorPantallas> {
           }
           _procesarEstadoJson(data);
         });
+        // Mostrar dialog de resultado si llegó
+        if (_resultadoPendiente != null && mounted) {
+          final r = _resultadoPendiente!;
+          _resultadoPendiente = null;
+          WidgetsBinding.instance.addPostFrameCallback((_) {
+            if (mounted) _mostrarResultadoDialog(r);
+          });
+        }
       }
     });
   }
 
+  // --- DIALOG DE RESULTADO DE RONDA ---
+  void _mostrarResultadoDialog(Map<String, dynamic> r) {
+    final tipo = r['tipo'] ?? '';
+    final mensaje = r['mensaje'] ?? '';
+    final esGanador = tipo == 'ganador';
+    final esFraude = tipo == 'fraude';
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => AlertDialog(
+        backgroundColor: const Color(0xFF18181B),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(24)),
+        title: Row(
+          children: [
+            Icon(
+              esGanador ? Icons.emoji_events : esFraude ? Icons.warning : Icons.info,
+              color: esGanador ? Colors.amber : esFraude ? Colors.redAccent : Colors.grey,
+              size: 28,
+            ),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Text(
+                esGanador ? '🏆 VEREDICTO' : esFraude ? '⚠️ FRAUDE' : 'RESULTADOS',
+                style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16),
+              ),
+            ),
+          ],
+        ),
+        content: Text(mensaje, style: const TextStyle(color: Colors.white70, fontSize: 14)),
+        actions: [
+          ElevatedButton(
+            style: ElevatedButton.styleFrom(
+              backgroundColor: const Color(0xFF8B5CF6),
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+            ),
+            onPressed: () => Navigator.pop(context),
+            child: const Text('CONTINUAR'),
+          ),
+        ],
+      ),
+    );
+  }
   // --- TRANSICIONES Y ACCESOS ---
+
+  String _formatEstado(String estado) {
+    switch (estado) {
+      case 'JUEGO_EN_CURSO': return 'JUEGO EN CURSO';
+      case 'ESPERA_VEREDICTO': return 'EN ESPERA';
+      case 'APUESTAS': return 'APUESTAS';
+      case 'VEREDICTO': return 'VEREDICTO';
+      case 'JUICIO': return 'TRIBUNAL';
+      case 'CONTRAATAQUE': return 'CONTRAATAQUE';
+      case 'LOBBY': return 'LOBBY';
+      default: return estado;
+    }
+  }
 
   void _ejecutarLogin(String nombre) async {
     if (nombre.trim().isEmpty) return;
@@ -454,10 +523,11 @@ class _GestorPantallasState extends State<GestorPantallas> {
   Widget _buildSala() {
     bool esLobby = _estadoSala == "LOBBY";
     bool esApuestas = _estadoSala == "APUESTAS";
+    bool esJuego = _estadoSala == "JUEGO_EN_CURSO";
     bool esMiTurno =
         (_turnoPerteneciente.toUpperCase() == miNombre.toUpperCase());
 
-    // BOTONES DISABLEABLES
+    // ── FASE APUESTAS: solo Apostar / Igualar / Retirarse ──
     VoidCallback? fApuesta = (esApuestas && esMiTurno)
         ? () {
             String input = "";
@@ -465,12 +535,17 @@ class _GestorPantallasState extends State<GestorPantallas> {
               context: context,
               builder: (_) => AlertDialog(
                 backgroundColor: Colors.grey.shade900,
-                title: const Text("Ingresar Cifra"),
+                title: const Text("Ingresa la cifra a apostar"),
                 content: TextField(
                   onChanged: (v) => input = v,
                   keyboardType: TextInputType.number,
+                  decoration: const InputDecoration(hintText: "Monto"),
                 ),
                 actions: [
+                  TextButton(
+                    onPressed: () => Navigator.pop(context),
+                    child: const Text("Cancelar", style: TextStyle(color: Colors.grey)),
+                  ),
                   ElevatedButton(
                     onPressed: () {
                       Navigator.pop(context);
@@ -488,22 +563,21 @@ class _GestorPantallasState extends State<GestorPantallas> {
         : null;
     VoidCallback? fHuir = (esApuestas && esMiTurno)
         ? () => enviarComandoSala("!retirarse")
-        : null; // Label "Retirarse"
+        : null;
 
-    VoidCallback? fDuelo =
-        (esApuestas && esMiTurno && !_haAtacado && _suerte > 0)
+    // ── FASE JUEGO_EN_CURSO: Duelo libre para quien no haya atacado, Acusar para todos ──
+    VoidCallback? fDuelo = (esJuego && !_haAtacado && _suerte > 0)
         ? () => setState(() => _interfazLocal = "ataque_obj")
         : null;
-    VoidCallback? fAcusar = (esApuestas && _suerte > 0)
+    VoidCallback? fAcusar = (esJuego && _suerte > 0)
         ? () => setState(() => _interfazLocal = "acusar")
         : null;
 
     VoidCallback? fRepartir = (esAnfitrion && esLobby)
         ? () => enviarComandoSala("!repartir")
         : null;
-    // Solo puede finalizar durante apuestas, no en lobby y no si ya finalizó
-    VoidCallback? fFinalizar =
-        (esAnfitrion && _estadoSala != "LOBBY" && _estadoSala != "VEREDICTO")
+    // "Decidir Ganador" solo activo en JUEGO_EN_CURSO → inicia VEREDICTO
+    VoidCallback? fFinalizar = (esAnfitrion && esJuego)
         ? () => enviarComandoSala("!finalizar")
         : null;
 
@@ -511,7 +585,7 @@ class _GestorPantallasState extends State<GestorPantallas> {
       children: [
         // MARCADORES GLOBALES HUD
         Container(
-          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
           decoration: BoxDecoration(
             color: const Color(0xFF09090B),
             border: Border(
@@ -525,7 +599,7 @@ class _GestorPantallasState extends State<GestorPantallas> {
             mainAxisAlignment: MainAxisAlignment.spaceAround,
             children: [
               _MiniMarcador("POZO", "\$$_pozo", Colors.greenAccent),
-              _MiniMarcador("ESTADO", _estadoSala, Colors.white),
+              _MiniMarcador("ESTADO", _formatEstado(_estadoSala), Colors.white),
               _MiniMarcador(
                 "TURNO",
                 _turnoPerteneciente.isEmpty ? "----" : _turnoPerteneciente,
@@ -535,10 +609,9 @@ class _GestorPantallasState extends State<GestorPantallas> {
           ),
         ),
 
-        // CAJA CENTRAL DINÁMICA (REEMPLAZA EL CHAT Y LA CARTA ÚNICA)
         Expanded(
           child: Padding(
-            padding: const EdgeInsets.all(20.0),
+            padding: const EdgeInsets.all(10.0),
             child: _buildTapeteDinamico(),
           ),
         ),
@@ -564,8 +637,8 @@ class _GestorPantallasState extends State<GestorPantallas> {
                   children: [
                     Container(
                       padding: const EdgeInsets.symmetric(
-                        vertical: 8,
-                        horizontal: 20,
+                        vertical: 5,
+                        horizontal: 16,
                       ),
                       decoration: BoxDecoration(
                         color: const Color(0xFF8B5CF6).withOpacity(0.1),
@@ -575,19 +648,20 @@ class _GestorPantallasState extends State<GestorPantallas> {
                         ),
                       ),
                       child: Text(
-                        "🪙 SUERTE RESTANTE: \$$_suerte",
+                        "🪙 SUERTE: \$$_suerte",
                         style: const TextStyle(
                           color: Color(0xFFC4B5FD),
                           fontWeight: FontWeight.bold,
-                          letterSpacing: 2,
+                          fontSize: 13,
+                          letterSpacing: 1,
                         ),
                       ),
                     ),
-                    const SizedBox(height: 15),
+                    const SizedBox(height: 8),
 
                     SingleChildScrollView(
                       scrollDirection: Axis.horizontal,
-                      padding: const EdgeInsets.symmetric(horizontal: 8),
+                      padding: const EdgeInsets.symmetric(horizontal: 4),
                       child: Row(
                         children: [
                           _ChipAccion(
@@ -624,7 +698,7 @@ class _GestorPantallasState extends State<GestorPantallas> {
                       ),
                     ),
                     if (esAnfitrion) ...[
-                      const SizedBox(height: 15),
+                      const SizedBox(height: 8),
                       Row(
                         mainAxisAlignment: MainAxisAlignment.center,
                         children: [
@@ -767,13 +841,31 @@ class _GestorPantallasState extends State<GestorPantallas> {
           borderRadius: BorderRadius.vertical(top: Radius.circular(30)),
         ),
         builder: (context) {
-          if (salas.isEmpty) {
-            return const Padding(
-              padding: EdgeInsets.all(40),
-              child: Text(
-                "No hay salas públicas disponibles.",
-                textAlign: TextAlign.center,
-                style: TextStyle(fontSize: 18, color: Colors.grey),
+        if (salas.isEmpty) {
+            return Padding(
+              padding: const EdgeInsets.all(30),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const Icon(Icons.radar, size: 48, color: Colors.white24),
+                  const SizedBox(height: 16),
+                  const Text(
+                    "No hay salas disponibles en este momento.",
+                    textAlign: TextAlign.center,
+                    style: TextStyle(fontSize: 16, color: Colors.grey),
+                  ),
+                  const SizedBox(height: 24),
+                  ElevatedButton(
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: const Color(0xFF8B5CF6),
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(14),
+                      ),
+                    ),
+                    onPressed: () => Navigator.pop(context),
+                    child: const Text("CERRAR"),
+                  ),
+                ],
               ),
             );
           }
@@ -1062,17 +1154,17 @@ class _ChipAccion extends StatelessWidget {
     bool d = onTap == null;
     Color c = d ? Colors.grey.shade600 : color;
     return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 4.0),
+      padding: const EdgeInsets.symmetric(horizontal: 3.0),
       child: Material(
         color: Colors.transparent,
         child: InkWell(
           onTap: onTap,
-          borderRadius: BorderRadius.circular(30),
+          borderRadius: BorderRadius.circular(26),
           child: Container(
-            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
             decoration: BoxDecoration(
               color: d ? Colors.transparent : c.withOpacity(0.15),
-              borderRadius: BorderRadius.circular(30),
+              borderRadius: BorderRadius.circular(26),
               border: Border.all(
                 color: d ? Colors.white12 : c.withOpacity(0.5),
               ),
@@ -1080,14 +1172,14 @@ class _ChipAccion extends StatelessWidget {
             child: Row(
               mainAxisSize: MainAxisSize.min,
               children: [
-                Icon(icon, color: c, size: 18),
-                const SizedBox(width: 8),
+                Icon(icon, color: c, size: 16),
+                const SizedBox(width: 6),
                 Text(
                   label,
                   style: TextStyle(
                     color: c,
                     fontWeight: FontWeight.bold,
-                    fontSize: 13,
+                    fontSize: 12,
                   ),
                 ),
               ],

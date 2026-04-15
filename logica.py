@@ -41,6 +41,7 @@ def on_join(data):
 
 # --- FUNCIONES DE SOPORTE ---
 
+
 def obtener_estado_juego(nombre_sala, user_id):
     if not nombre_sala or nombre_sala not in salas:
         return None
@@ -50,13 +51,19 @@ def obtener_estado_juego(nombre_sala, user_id):
     if sala["lista_circular"] and sala["puntero_turno"] < len(sala["lista_circular"]):
         t_id_actual = sala["lista_circular"][sala["puntero_turno"]]
         turno_nombre = jugadores.get(t_id_actual, {}).get("nombre", "")
-        
-    jugadores_activos = [jugadores[n]["nombre"] for n in sala["lista_circular"] if n in jugadores]
-    
+
+    jugadores_activos = [
+        jugadores[n]["nombre"] for n in sala["lista_circular"] if n in jugadores
+    ]
+
     soy_defensor = False
-    if sala["estado"] == "CONTRAATAQUE" and sala.get("duelo_activo") and sala["duelo_activo"]["defensor"] == user_id:
+    if (
+        sala["estado"] == "CONTRAATAQUE"
+        and sala.get("duelo_activo")
+        and sala["duelo_activo"]["defensor"] == user_id
+    ):
         soy_defensor = True
-        
+
     acusado = ""
     if sala["estado"] == "JUICIO" and sala.get("candidato") in jugadores:
         acusado = jugadores[sala["candidato"]]["nombre"]
@@ -68,12 +75,15 @@ def obtener_estado_juego(nombre_sala, user_id):
         "turno_de": turno_nombre,
         "suerte": j["suerte"] if j else 0,
         "identidad": j.get("identidad") if j else None,
-        "url_imagen": CARTAS_URLS.get(j.get("identidad")) if j and j.get("identidad") else None,
+        "url_imagen": CARTAS_URLS.get(j.get("identidad"))
+        if j and j.get("identidad")
+        else None,
         "jugadores_activos": jugadores_activos,
         "soy_defensor": soy_defensor,
         "acusado": acusado,
-        "ha_atacado": j.get("ha_atacado", False) if j else False
+        "ha_atacado": j.get("ha_atacado", False) if j else False,
     }
+
 
 def notificar_privado(user_id, mensaje, url_imagen=None, resultado=None):
     """Transmisión vía WebSocket directo a la app."""
@@ -86,6 +96,7 @@ def notificar_privado(user_id, mensaje, url_imagen=None, resultado=None):
         socketio.emit("notificacion", payload, room=user_id)
     except Exception as e:
         print(f"Falla crítica de transmisión a {user_id}: {e}")
+
 
 def notificar_sala(nombre_sala, mensaje, url_imagen=None, excluir=None, resultado=None):
     """Transmisión para todos los jugadores en la sala."""
@@ -101,11 +112,16 @@ def avanzar_turno(nombre_sala):
     sala["turnos_jugados"] += 1
 
     if sala["turnos_jugados"] >= len(sala["lista_circular"]):
-        sala["estado"] = "ESPERA_VEREDICTO"
-        msg_fin = "🔔 RONDA DE APUESTAS CERRADA.\nTodos apostaron. El Anfitrión decidirá al ganador."
-        # Notify ALL players that betting round is over
+        sala["estado"] = "JUEGO_EN_CURSO"
+        # Resetear ha_atacado para todos para la fase de combate libre
+        for jid in sala["lista_circular"]:
+            jugadores[jid]["ha_atacado"] = False
+        msg_fin = "🔔 RONDA DE APUESTAS CERRADA.\nJuego en curso. El combate puede comenzar.\nAnfitrión usa !finalizar cuando sea momento de votar al ganador."
+        # Notify ALL players that betting round is over → game is now active
         socketio.start_background_task(notificar_sala, nombre_sala, msg_fin)
-        return "Rueda completada. La economía se congela. Esperando comando del Anfitrión."
+        return (
+            "Rueda completada. Fase de combate activa."
+        )
     else:
         sala["puntero_turno"] = (sala["puntero_turno"] + 1) % len(
             sala["lista_circular"]
@@ -123,14 +139,13 @@ def avanzar_turno(nombre_sala):
             nombre_sala,
             f"Turno transferido a: {jugadores[nuevo_turno]['nombre']}",
             None,
-            nuevo_turno
+            nuevo_turno,
         )
         return f"Turno transferido a Sujeto: {jugadores[nuevo_turno]['nombre']}."
 
 
 def aislar_top_3(nombre_sala):
-    pass # Ya no se usa, pero la dejamos por compatibilidad si es llamada en otro lado
-
+    pass  # Ya no se usa, pero la dejamos por compatibilidad si es llamada en otro lado
 
 
 # --- NÚCLEO REST API ---
@@ -220,11 +235,19 @@ def ejecutar_comando():
             return responder("❌ Infracción. Usted ya ocupa un asiento en otra sala.")
         elif arg_completo in salas:
             if len(salas[arg_completo]["lista_circular"]) >= 8:
-                return responder("La sala ha alcanzado su límite operativo (8 sujetos). Acceso denegado.")
+                return responder(
+                    "La sala ha alcanzado su límite operativo (8 sujetos). Acceso denegado."
+                )
             jugadores[remitente]["sala"] = arg_completo
             salas[arg_completo]["lista_circular"].append(remitente)
             pos = len(salas[arg_completo]["lista_circular"]) - 1
-            socketio.start_background_task(notificar_sala, arg_completo, f"El sujeto {jugadores[remitente]['nombre']} se ha unido a la sala.", None, remitente)
+            socketio.start_background_task(
+                notificar_sala,
+                arg_completo,
+                f"El sujeto {jugadores[remitente]['nombre']} se ha unido a la sala.",
+                None,
+                remitente,
+            )
             return responder(
                 f"Inyección exitosa. Posición asignada en la rueda: T-{pos}."
             )
@@ -238,13 +261,17 @@ def ejecutar_comando():
             sala = salas[mi_sala]
             sala["estado"] = "APUESTAS"
 
-            if len(sala["lista_circular"]) == 2:
+            # SIEMPRE 2 jokers (red + black) sin importar el número de jugadores
+            n_jugadores = len(sala["lista_circular"])
+            if n_jugadores == 2:
                 roles = ["red_joker", "black_joker"]
             else:
-                roles = []
-                while len(roles) < len(sala["lista_circular"]):
-                    roles.extend(IDENTIDADES_POSIBLES)
-                roles = roles[:len(sala["lista_circular"])]
+                cartas_normales = [c for c in IDENTIDADES_POSIBLES if "joker" not in c]
+                relleno = []
+                while len(relleno) < (n_jugadores - 2):
+                    relleno.extend(cartas_normales)
+                relleno = relleno[: (n_jugadores - 2)]
+                roles = ["red_joker", "black_joker"] + relleno
             random.shuffle(roles)
 
             for j in sala["lista_circular"]:
@@ -287,7 +314,13 @@ def ejecutar_comando():
             multa = int(jugadores[remitente]["suerte"] * 0.5)
             jugadores[remitente]["suerte"] -= multa
             jugadores[remitente]["estado_vital"] = "Retirado"
-            socketio.start_background_task(notificar_sala, mi_sala, f"{jugadores[remitente]['nombre']} huyó acobardado.", None, remitente)
+            socketio.start_background_task(
+                notificar_sala,
+                mi_sala,
+                f"{jugadores[remitente]['nombre']} huyó acobardado.",
+                None,
+                remitente,
+            )
             status = avanzar_turno(mi_sala)
             return responder(
                 f"Cobardía registrada. Multa del 50% aplicada (-{multa} suerte).\n{status}"
@@ -322,9 +355,17 @@ def ejecutar_comando():
                 sala["apuesta_maxima"] = monto
 
             jugadores[remitente]["ha_atacado"] = True
-            
-            accion_txt = f"apostó {monto}" if comando == "!apostar" else "igualó la apuesta"
-            socketio.start_background_task(notificar_sala, mi_sala, f"{jugadores[remitente]['nombre']} {accion_txt}.", None, remitente)
+
+            accion_txt = (
+                f"apostó {monto}" if comando == "!apostar" else "igualó la apuesta"
+            )
+            socketio.start_background_task(
+                notificar_sala,
+                mi_sala,
+                f"{jugadores[remitente]['nombre']} {accion_txt}.",
+                None,
+                remitente,
+            )
 
             status = avanzar_turno(mi_sala)
             return responder(f"Transacción confirmada. Pozo encriptado.\n{status}")
@@ -336,11 +377,14 @@ def ejecutar_comando():
             return responder("No estás en una sala.")
         sala = salas[mi_sala]
 
+        if sala["estado"] not in ["JUEGO_EN_CURSO", "APUESTAS"]:
+            return responder("Protocolo ofensivo bloqueado. Solo disponible durante el juego en curso.")
+
         if len(sala["lista_circular"]) <= 2:
             return responder(
                 "Protocolo ofensivo bloqueado. En escenarios 1vs1 el robo de identidad está deshabilitado. Solo la asfixia económica decidirá al ganador."
             )
-        elif remitente != sala["lista_circular"][sala["puntero_turno"]]:
+        elif sala["estado"] == "APUESTAS" and remitente != sala["lista_circular"][sala["puntero_turno"]]:
             return responder("Acción ofensiva denegada. Espere su turno.")
         elif jugadores[remitente]["ha_atacado"]:
             return responder("Munición agotada para este ciclo.")
@@ -410,7 +454,7 @@ def ejecutar_comando():
                 jugadores[remitente]["suerte"] += robo
                 respuesta_txt = f"💥 REPRESALIA LETAL CONFIRMADA. {robo} de suerte arrebatados al retador original."
 
-            sala["estado"] = "APUESTAS"
+            sala["estado"] = "JUEGO_EN_CURSO"
             sala["duelo_activo"] = None
             return responder(respuesta_txt)
 
@@ -420,6 +464,9 @@ def ejecutar_comando():
         if not mi_sala:
             return responder("No estás en una sala.")
         sala = salas[mi_sala]
+
+        if sala["estado"] not in ["JUEGO_EN_CURSO", "APUESTAS"]:
+            return responder("Tribunal bloqueado. Solo disponible durante el juego en curso.")
 
         if len(sala["lista_circular"]) <= 2:
             return responder(
@@ -439,8 +486,16 @@ def ejecutar_comando():
                 sala["estado"] = "JUICIO"
                 sala["candidato"] = obj_id
                 sala["votantes"] = {}
+                # Notificar a TODOS para que abra el panel de votación
+                socketio.start_background_task(
+                    notificar_sala,
+                    mi_sala,
+                    f"⚖️ TRIBUNAL CONVOCADO contra {jugadores[obj_id]['nombre']}.\nTodos deben votar: !votar si / !votar no.",
+                    None,
+                    None,
+                )
                 return responder(
-                    f"⚖️ TRIBUNAL CONVOCADO contra {jugadores[obj_id]['nombre']}.\nLa mesa debe dictar sentencia obligatoria: !votar si / !votar no."
+                    f"⚖️ TRIBUNAL CONVOCADO contra {jugadores[obj_id]['nombre']}.\nLa mesa debe dictar sentencia obligatoria."
                 )
             else:
                 return responder("Objetivo no detectado en el radar de la sala.")
@@ -501,7 +556,7 @@ def ejecutar_comando():
                                 jugadores[v_id]["suerte"] * 0.1
                             )
 
-            sala["estado"] = "APUESTAS"
+            sala["estado"] = "JUEGO_EN_CURSO"
             sala["votantes"] = {}
             sala["candidato"] = None
             return responder(respuesta_txt)
@@ -513,11 +568,13 @@ def ejecutar_comando():
             return responder("No estás en ninguna sala.")
         salas[mi_sala]["estado"] = "VEREDICTO"
         salas[mi_sala]["votantes"] = {}
-        # Notify ALL players so their UI switches to VEREDICTO mode
+        # Notify ALL players (incluyendo anfitrión) so their UI switches to VEREDICTO mode
         socketio.start_background_task(
-            notificar_sala, mi_sala,
-            "🏆 FASE FINAL INICIADA. Todos los sujetos deben emitir su veredicto.",
-            None, remitente, None
+            notificar_sala,
+            mi_sala,
+            "🏆 FASE FINAL INICIADA. Todos los sujetos deben emitir su veredicto: !ganador [nombre].",
+            None,
+            None,
         )
         return responder(
             "Fase de reto físico concluida. Decide el ganador tácticamente."
@@ -536,11 +593,17 @@ def ejecutar_comando():
 
         faltan = len(sala["lista_circular"]) - len(sala["votantes"])
         if faltan > 0:
-            return responder(f"Voto registrado. Faltan {faltan} firma(s) para el veredicto.")
+            return responder(
+                f"Voto registrado. Faltan {faltan} firma(s) para el veredicto."
+            )
 
         # ── ALL PLAYERS HAVE VOTED ─────────────────────────────────────────
         # Only Jokers' votes decide the outcome
-        jokers = [j for j in sala["lista_circular"] if jugadores[j].get("identidad") and "joker" in jugadores[j]["identidad"]]
+        jokers = [
+            j
+            for j in sala["lista_circular"]
+            if jugadores[j].get("identidad") and "joker" in jugadores[j]["identidad"]
+        ]
         votos_jokers = list({sala["votantes"].get(j, "") for j in jokers})
         pozo = sala["pozo_acumulado"]
 
@@ -553,13 +616,21 @@ def ejecutar_comando():
                 for j in sala["lista_circular"]:
                     jugadores[j]["suerte"] -= int(jugadores[j]["suerte"] * 0.10)
                 respuesta_txt = "⚠️ CONSENSO: NINGUNO. El pozo se evapora. Todos los sujetos pierden el 10% de su suerte."
-                resultado_payload = {"tipo": "ninguno", "ganador": "", "mensaje": respuesta_txt}
+                resultado_payload = {
+                    "tipo": "ninguno",
+                    "ganador": "",
+                    "mensaje": respuesta_txt,
+                }
 
             else:
                 # ── GANADOR: el consenso elige un ganador ───────────────────
                 ganador_id = next(
-                    (n for n in sala["lista_circular"] if jugadores[n]["nombre"].lower() == voto_consenso),
-                    None
+                    (
+                        n
+                        for n in sala["lista_circular"]
+                        if jugadores[n]["nombre"].lower() == voto_consenso
+                    ),
+                    None,
                 )
                 if not ganador_id:
                     # Invalid name voted — treat as disidencia
@@ -574,9 +645,16 @@ def ejecutar_comando():
                         neto = pozo - impuesto
                         jugadores[ganador_id]["suerte"] += neto
                         for j in jokers:
-                            jugadores[j]["suerte"] += int(impuesto / len(jokers)) if jokers else 0
+                            jugadores[j]["suerte"] += (
+                                int(impuesto / len(jokers)) if jokers else 0
+                            )
                         respuesta_txt = f"✅ CONSENSO ALCANZADO. {ganador_nom} recibe {neto} suerte. Árbitros cobran {impuesto} de comisión. Ronda terminada."
-                    resultado_payload = {"tipo": "ganador", "ganador": ganador_nom, "pozo": pozo, "mensaje": respuesta_txt}
+                    resultado_payload = {
+                        "tipo": "ganador",
+                        "ganador": ganador_nom,
+                        "pozo": pozo,
+                        "mensaje": respuesta_txt,
+                    }
 
             if len(votos_jokers) == 1:  # Still consensus after possible invalid check
                 # ── Reset sala → LOBBY ───────────────────────────────────────
@@ -606,71 +684,75 @@ def ejecutar_comando():
                 # Notify eliminated players
                 for e in eliminados:
                     socketio.start_background_task(
-                        notificar_privado, e,
+                        notificar_privado,
+                        e,
                         "💀 PROTOCOLO DE EXTERMINIO EJECUTADO.\nSignos vitales (Suerte): 0.\nHas sido purgado del sistema y expulsado de la sala permanentemente.",
-                        resultado={"tipo": "eliminado", "mensaje": "Has sido eliminado del juego."}
+                        resultado={
+                            "tipo": "eliminado",
+                            "mensaje": "Has sido eliminado del juego.",
+                        },
                     )
 
                 # Notify all survivors with resultado screen
                 socketio.start_background_task(
-                    notificar_sala, mi_sala, respuesta_txt, None, None, resultado_payload
+                    notificar_sala,
+                    mi_sala,
+                    respuesta_txt,
+                    None,
+                    None,
+                    resultado_payload,
                 )
 
                 return responder(respuesta_txt, resultado=resultado_payload)
 
         # ── CASO B: Disidencia (Jokers no se pusieron de acuerdo) ──────────
-        fraude_txt = "⚠️ FRAUDE DETECTADO. Los árbitros no llegaron a un acuerdo y fueron sancionados. Nuevos árbitros han tomado su lugar en las sombras. La votación se reinicia."
+        fraude_txt = "⚠️ FRAUDE DETECTADO. Los árbitros no llegaron a un acuerdo. El pozo se evapora. Los Jokers caen a Cero Absoluto y son purgados del sistema."
         resultado_fraude = {"tipo": "fraude", "ganador": "", "mensaje": fraude_txt}
 
-        # Penalize current jokers: -50% suerte
+        # Jokers caen a CERO ABSOLUTO
         for j in jokers:
-            jugadores[j]["suerte"] -= int(jugadores[j]["suerte"] * 0.50)
+            jugadores[j]["suerte"] = 0
 
-        # Reassign Joker identities to random non-Joker players
-        no_jokers = [j for j in sala["lista_circular"] if j not in jokers]
-        joker_tipos = ["red_joker", "black_joker"]
-        nuevos_jokers = random.sample(no_jokers, min(len(jokers), len(no_jokers))) if no_jokers else []
-
-        for i, nj in enumerate(nuevos_jokers):
-            jugadores[nj]["identidad"] = joker_tipos[i % len(joker_tipos)]
-            socketio.start_background_task(
-                notificar_privado, nj,
-                "🦠 HAS SIDO SELECCIONADO COMO NUEVO ÁRBITRO.\nEres un Joker. Tu voto decidirá el destino del pozo.\nProtege esta información."
-            )
-
-        # Ex-jokers get a new random regular card
-        cartas_regulares = [c for c in IDENTIDADES_POSIBLES if "joker" not in c]
-        for j in jokers:
-            jugadores[j]["identidad"] = random.choice(cartas_regulares) if cartas_regulares else "ace_of_spades2"
-
-        # Garbage collector for sanctioned jokers that reached 0
+        # Garbage collector — elimina a jugadores con suerte <= 0
         eliminados = []
-        sobrevivientes_temp = []
+        sobrevivientes = []
         for j in sala["lista_circular"]:
             if jugadores[j]["suerte"] <= 0:
                 jugadores[j]["estado_vital"] = "Eliminado"
                 jugadores[j]["sala"] = None
                 eliminados.append(j)
             else:
-                sobrevivientes_temp.append(j)
-        sala["lista_circular"] = sobrevivientes_temp
+                sobrevivientes.append(j)
+        sala["lista_circular"] = sobrevivientes
 
         for e in eliminados:
             socketio.start_background_task(
-                notificar_privado, e,
+                notificar_privado,
+                e,
                 "💀 PROTOCOLO DE EXTERMINIO EJECUTADO.\nSignos vitales (Suerte): 0.\nHas sido purgado del sistema y expulsado de la sala permanentemente.",
-                resultado={"tipo": "eliminado", "mensaje": "Has sido eliminado del juego."}
+                resultado={
+                    "tipo": "eliminado",
+                    "mensaje": "Has sido eliminado del juego.",
+                },
             )
 
-        # Reset votes only, keep VEREDICTO state for re-vote
+        # El pozo se evapora y la sala vuelve a LOBBY para nueva ronda
+        sala["pozo_acumulado"] = 0
+        sala["turnos_jugados"] = 0
+        sala["apuesta_maxima"] = 0
+        sala["puntero_turno"] = 0
         sala["votantes"] = {}
+        sala["estado"] = "LOBBY"
+        for j in sala["lista_circular"]:
+            jugadores[j]["identidad"] = None
 
-        # Notify all with fraud resultado (triggers resultado screen then returns to VEREDICTO panel)
+        # Notificar a todos con el resultado de fraude
         socketio.start_background_task(
             notificar_sala, mi_sala, fraude_txt, None, None, resultado_fraude
         )
 
         return responder(fraude_txt, resultado=resultado_fraude)
+
 
     # 7. UTILERÍA
     elif comando in ["!salas", "!mesas"]:
@@ -726,24 +808,39 @@ def ejecutar_comando():
                     jugadores[remitente]["suerte"] -= multa
                     sala["pozo_acumulado"] += multa
                     jugadores[remitente]["estado_vital"] = "Retirado"
-                    socketio.start_background_task(notificar_sala, mi_sala, f"{jugadores[remitente]['nombre']} huyó en plena ronda. Suerte confiscada al pozo.", None, remitente)
-                    
+                    socketio.start_background_task(
+                        notificar_sala,
+                        mi_sala,
+                        f"{jugadores[remitente]['nombre']} huyó en plena ronda. Suerte confiscada al pozo.",
+                        None,
+                        remitente,
+                    )
+
                 sala["lista_circular"].remove(remitente)
                 if not sala["lista_circular"]:
                     del salas[mi_sala]
                 else:
                     if sala["estado"] == "LOBBY":
-                        socketio.start_background_task(notificar_sala, mi_sala, f"{jugadores[remitente]['nombre']} ha abandonado la sala.", None, remitente)
+                        socketio.start_background_task(
+                            notificar_sala,
+                            mi_sala,
+                            f"{jugadores[remitente]['nombre']} ha abandonado la sala.",
+                            None,
+                            remitente,
+                        )
             jugadores[remitente]["sala"] = None
             return responder("Has abandonado la sala exitosamente.")
         return responder("No estás en ninguna sala.")
 
     elif comando == "!json_salas":
         import json
+
         lista = []
         for nombre, datos in salas.items():
             if datos["estado"] == "LOBBY" and len(datos["lista_circular"]) < 8:
-                lista.append({"nombre": nombre, "cantidad": len(datos["lista_circular"])})
+                lista.append(
+                    {"nombre": nombre, "cantidad": len(datos["lista_circular"])}
+                )
         return responder(json.dumps(lista))
 
     # 8. MÓDULO DE ASISTENCIA (MENÚ)
