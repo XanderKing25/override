@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 import 'dart:convert';
 import 'dart:ui';
@@ -48,7 +49,15 @@ class _GestorPantallasState extends State<GestorPantallas> {
   String miNombre = "";
   bool esAnfitrion = false;
 
-  final String serverUrl = 'http://192.168.80.21:5000';
+  String get serverUrl {
+    if (kIsWeb) {
+      final host = Uri.base.host;
+      if (host.isNotEmpty) {
+        return 'http://$host:5000';
+      }
+    }
+    return 'http://192.168.80.18:5000';
+  }
   IO.Socket? socket;
 
   // --- VARIABLES HUD Y CONTEXTO ---
