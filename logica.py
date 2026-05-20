@@ -42,15 +42,92 @@ def on_join(data):
 # --- FUNCIONES DE SOPORTE ---
 
 
+def limpiar_eliminados(nombre_sala):
+    """Verifica si algún jugador se ha quedado sin suerte (suerte <= 0) y lo expulsa de la sala de inmediato."""
+    if not nombre_sala or nombre_sala not in salas:
+        return
+    sala = salas[nombre_sala]
+    eliminados = []
+    sobrevivientes = []
+    
+    for j in list(sala["lista_circular"]):
+        if jugadores.get(j, {}).get("suerte", 0) <= 0:
+            jugadores[j]["estado_vital"] = "Eliminado"
+            jugadores[j]["sala"] = None
+            eliminados.append(j)
+        else:
+            sobrevivientes.append(j)
+            
+    sala["lista_circular"] = sobrevivientes
+    
+    for e in eliminados:
+        socketio.start_background_task(
+            notificar_privado,
+            e,
+            "💀 PROTOCOLO DE EXTERMINIO EJECUTADO.\nSignos vitales (Suerte): 0 o menor.\nHas sido purgado del sistema y expulsado de la sala permanentemente.",
+            resultado={
+                "tipo": "eliminado",
+                "mensaje": "Has sido eliminado de la sala por quedarte sin suerte.",
+            },
+        )
+        socketio.start_background_task(
+            notificar_sala,
+            nombre_sala,
+            f"💀 El sujeto {jugadores[e]['nombre']} se ha quedado sin suerte y ha sido expulsado permanentemente."
+        )
+
+    # Si solo queda 1 jugador y la partida ya empezó, coronarlo ganador absoluto!
+    if len(sala["lista_circular"]) == 1 and sala["estado"] != "LOBBY":
+        ganador_unico = sala["lista_circular"][0]
+        nombre_ganador = jugadores[ganador_unico]["nombre"]
+        
+        sala["pozo_acumulado"] = 0
+        sala["turnos_jugados"] = 0
+        sala["apuesta_maxima"] = 0
+        sala["puntero_turno"] = 0
+        sala["votantes"] = {}
+        sala["estado"] = "LOBBY"
+        jugadores[ganador_unico]["identidad"] = None
+        
+        msg_victoria = f"🏆 ¡EL SUJETO {nombre_ganador} ES EL ÚNICO SOBREVIVIENTE Y HA GANADO LA PARTIDA! 🏆"
+        socketio.start_background_task(
+            notificar_sala,
+            nombre_sala,
+            msg_victoria,
+            resultado={
+                "tipo": "ganador",
+                "ganador": nombre_ganador,
+                "mensaje": msg_victoria
+            }
+        )
+    elif len(sala["lista_circular"]) == 0:
+        sala["pozo_acumulado"] = 0
+        sala["turnos_jugados"] = 0
+        sala["apuesta_maxima"] = 0
+        sala["puntero_turno"] = 0
+        sala["votantes"] = {}
+        sala["estado"] = "LOBBY"
+
+
+
 def obtener_estado_juego(nombre_sala, user_id):
     if not nombre_sala or nombre_sala not in salas:
         return None
     sala = salas[nombre_sala]
     j = jugadores.get(user_id)
     turno_nombre = ""
-    if sala["lista_circular"] and sala["puntero_turno"] < len(sala["lista_circular"]):
-        t_id_actual = sala["lista_circular"][sala["puntero_turno"]]
-        turno_nombre = jugadores.get(t_id_actual, {}).get("nombre", "")
+    if sala["estado"] == "APUESTAS":
+        if sala["lista_circular"] and sala["puntero_turno"] < len(sala["lista_circular"]):
+            t_id_actual = sala["lista_circular"][sala["puntero_turno"]]
+            turno_nombre = jugadores.get(t_id_actual, {}).get("nombre", "")
+    elif sala["estado"] == "CONTRAATAQUE":
+        if sala.get("duelo_activo"):
+            defensor_id = sala["duelo_activo"]["defensor"]
+            turno_nombre = jugadores.get(defensor_id, {}).get("nombre", "")
+    elif sala["estado"] == "JUICIO":
+        turno_nombre = "Votación"
+    elif sala["estado"] == "JUEGO_EN_CURSO":
+        turno_nombre = "Terminados"
 
     jugadores_activos = [
         jugadores[n]["nombre"] for n in sala["lista_circular"] if n in jugadores
@@ -190,7 +267,7 @@ def ejecutar_comando():
         elif remitente not in jugadores:
             jugadores[remitente] = {
                 "nombre": arg_completo,
-                "suerte": 100,
+                "suerte": 1000,
                 "identidad": None,
                 "estado_vital": "Activo",
                 "ha_atacado": False,
@@ -220,6 +297,11 @@ def ejecutar_comando():
                 "votantes": {},
                 "duelo_activo": None,
             }
+            if jugadores[remitente].get("suerte", 0) <= 0:
+                jugadores[remitente]["suerte"] = 1000
+            jugadores[remitente]["estado_vital"] = "Activo"
+            jugadores[remitente]["identidad"] = None
+            jugadores[remitente]["ha_atacado"] = False
             jugadores[remitente]["sala"] = arg_completo
             salas[arg_completo]["lista_circular"].append(remitente)
             return responder(
@@ -234,13 +316,21 @@ def ejecutar_comando():
         if jugadores[remitente]["sala"] is not None:
             return responder("❌ Infracción. Usted ya ocupa un asiento en otra sala.")
         elif arg_completo in salas:
-            if len(salas[arg_completo]["lista_circular"]) >= 8:
+            sala = salas[arg_completo]
+            if sala["estado"] != "LOBBY":
+                return responder("❌ Acceso denegado. La partida ya está en curso en esta sala.")
+            if len(sala["lista_circular"]) >= 8:
                 return responder(
                     "La sala ha alcanzado su límite operativo (8 sujetos). Acceso denegado."
                 )
+            if jugadores[remitente].get("suerte", 0) <= 0:
+                jugadores[remitente]["suerte"] = 1000
+            jugadores[remitente]["estado_vital"] = "Activo"
+            jugadores[remitente]["identidad"] = None
+            jugadores[remitente]["ha_atacado"] = False
             jugadores[remitente]["sala"] = arg_completo
-            salas[arg_completo]["lista_circular"].append(remitente)
-            pos = len(salas[arg_completo]["lista_circular"]) - 1
+            sala["lista_circular"].append(remitente)
+            pos = len(sala["lista_circular"]) - 1
             socketio.start_background_task(
                 notificar_sala,
                 arg_completo,
@@ -274,18 +364,32 @@ def ejecutar_comando():
                 roles = ["red_joker", "black_joker"] + relleno
             random.shuffle(roles)
 
+            # 1. Asignar la identidad a todos los jugadores en la sala, y asegurar suerte válida
             for j in sala["lista_circular"]:
-                jugadores[j]["suerte"] = 1000
+                if jugadores[j].get("suerte", 0) <= 0:
+                    jugadores[j]["suerte"] = 1000
+                jugadores[j]["estado_vital"] = "Activo"
                 jugadores[j]["identidad"] = roles.pop() if roles else "default"
 
-                ident_nombre = jugadores[j]["identidad"]
-                url_img = CARTAS_URLS[ident_nombre]
-                texto_carta = f"🃏 IDENTIDAD ASIGNADA 🃏\nSuerte inicial: 1000\nVariable: {ident_nombre}.\nProteja su pantalla."
+            # 2. Preparar el retorno del anfitrión de manera segura y definitiva
+            # Si el anfitrión no está en la lista por algún motivo, devolvemos un error controlado en vez de un UnboundLocalError
+            if remitente in sala["lista_circular"]:
+                ident_host = jugadores[remitente]["identidad"]
+                suerte_host = jugadores[remitente]["suerte"]
+                url_img_host = CARTAS_URLS.get(ident_host)
+                texto_carta_host = f"🃏 IDENTIDAD ASIGNADA 🃏\nSuerte actual: {suerte_host}\nVariable: {ident_host}.\nProteja su pantalla."
+                texto_host = f"Niebla de Guerra desplegada.\n\n{texto_carta_host}\n\n⚠️ ES TU TURNO (T-0) ⚠️\nOpciones de riesgo: !apostar [monto], !igualar, !retirarse"
+                respuesta_host = responder(texto_host, media=url_img_host)
+            else:
+                respuesta_host = responder("❌ Error: El anfitrión no se encuentra registrado en la rueda de la sala.")
 
-                if j == remitente:
-                    texto_host = f"Niebla de Guerra desplegada.\n\n{texto_carta}\n\n⚠️ ES TU TURNO (T-0) ⚠️\nOpciones de riesgo: !apostar [monto], !igualar, !retirarse"
-                    respuesta_host = responder(texto_host, media=url_img)
-                else:
+            # 3. Notificar privadamente por SocketIO al resto de jugadores (ya con todos inicializados)
+            for j in sala["lista_circular"]:
+                if j != remitente:
+                    ident_nombre = jugadores[j]["identidad"]
+                    suerte_jugador = jugadores[j]["suerte"]
+                    url_img = CARTAS_URLS.get(ident_nombre)
+                    texto_carta = f"🃏 IDENTIDAD ASIGNADA 🃏\nSuerte actual: {suerte_jugador}\nVariable: {ident_nombre}.\nProteja su pantalla."
                     socketio.start_background_task(
                         notificar_privado, j, texto_carta, url_img
                     )
@@ -311,8 +415,8 @@ def ejecutar_comando():
             return responder("Infracción de secuencia. Silencio en la sala.")
 
         if comando == "!retirarse":
-            multa = int(jugadores[remitente]["suerte"] * 0.5)
-            jugadores[remitente]["suerte"] -= multa
+            multa = max(0, int(jugadores[remitente]["suerte"] * 0.5))
+            jugadores[remitente]["suerte"] = max(0, jugadores[remitente]["suerte"] - multa)
             jugadores[remitente]["estado_vital"] = "Retirado"
             socketio.start_background_task(
                 notificar_sala,
@@ -333,6 +437,9 @@ def ejecutar_comando():
                 except:
                     return responder("Sintaxis requerida: !apostar [cantidad]")
 
+                if monto <= 0:
+                    return responder("❌ La apuesta debe ser mayor que cero.")
+
                 if monto < sala["apuesta_maxima"]:
                     return responder(
                         f"Apuesta denegada. La apuesta actual es de {sala['apuesta_maxima']}. Debes usar !igualar o !retirarse."
@@ -341,15 +448,11 @@ def ejecutar_comando():
                 monto = sala["apuesta_maxima"]
 
             if monto > jugadores[remitente]["suerte"]:
-                monto = jugadores[remitente]["suerte"]
-                jugadores[remitente]["estado_vital"] = "Muerte_Subita"
-                socketio.start_background_task(
-                    notificar_privado,
-                    remitente,
-                    "Has entrado en Muerte Súbita. Suerte drenada por completo, pero te mantienes en la ronda.",
+                return responder(
+                    f"❌ Operación rechazada. No posees suficiente suerte (Tu suerte: {jugadores[remitente]['suerte']}). Debes retirarte (!retirarse)."
                 )
 
-            jugadores[remitente]["suerte"] -= monto
+            jugadores[remitente]["suerte"] = max(0, jugadores[remitente]["suerte"] - monto)
             sala["pozo_acumulado"] += monto
             if monto > sala["apuesta_maxima"]:
                 sala["apuesta_maxima"] = monto
@@ -401,21 +504,23 @@ def ejecutar_comando():
                 ),
                 None,
             )
-
             if not obj_id:
                 return responder("Objetivo no detectado en el radar.")
             elif "joker" in carta_adiv:
-                jugadores[remitente]["ha_atacado"] = True
-                sala["estado"] = "CONTRAATAQUE"
-                sala["duelo_activo"] = {"retador": remitente, "defensor": obj_id}
-                return responder(
-                    f"⚠️ ERROR SISTÉMICO. Entidad JOKER inmune. Ataque anulado.\nSujeto {jugadores[obj_id]['nombre']}, envíe !contraataque [carta] para ejecutar represalia."
-                )
+                return responder("❌ Operación denegada. Los Jokers son inmunes al robo directo. Convoca al Tribunal (!acusar) para exponerlos.")
             elif jugadores[obj_id]["identidad"].lower() == carta_adiv:
-                robo = int(jugadores[obj_id]["suerte"] * 0.5)
-                jugadores[obj_id]["suerte"] -= robo
+                robo = max(0, int(jugadores[obj_id]["suerte"] * 0.5))
+                jugadores[obj_id]["suerte"] = max(0, jugadores[obj_id]["suerte"] - robo)
                 jugadores[remitente]["suerte"] += robo
                 jugadores[remitente]["ha_atacado"] = True
+                
+                # Notificar a toda la sala de la extracción exitosa
+                msg = f"💀 EXTRACCIÓN EXITOSA. {jugadores[remitente]['nombre']} adivinó la identidad de {jugadores[obj_id]['nombre']} y le robó {robo} de suerte."
+                socketio.start_background_task(notificar_sala, mi_sala, msg)
+                
+                # Limpiar eliminados inmediatamente
+                limpiar_eliminados(mi_sala)
+                
                 return responder(
                     f"💀 EXTRACCIÓN EXITOSA. {robo} de suerte transferidos de {obj_nom}."
                 )
@@ -423,6 +528,11 @@ def ejecutar_comando():
                 jugadores[remitente]["ha_atacado"] = True
                 sala["estado"] = "CONTRAATAQUE"
                 sala["duelo_activo"] = {"retador": remitente, "defensor": obj_id}
+                
+                # Notificar a toda la sala de que el contraataque está activo
+                msg = f"⚔️ Fallo balístico de {jugadores[remitente]['nombre']} contra {jugadores[obj_id]['nombre']}.\n¡El objetivo ha sido autorizado para contraatacar!"
+                socketio.start_background_task(notificar_sala, mi_sala, msg)
+                
                 return responder(
                     f"Fallo balístico. Objetivo {obj_nom} autorizado para ejecución inversa.\nEnvíe !contraataque [carta]."
                 )
@@ -449,13 +559,20 @@ def ejecutar_comando():
                     "Contraataque fallido. Ambos sujetos sobreviven al enfrentamiento."
                 )
             else:
-                robo = int(jugadores[retador]["suerte"] * 0.5)
-                jugadores[retador]["suerte"] -= robo
+                robo = max(0, int(jugadores[retador]["suerte"] * 0.5))
+                jugadores[retador]["suerte"] = max(0, jugadores[retador]["suerte"] - robo)
                 jugadores[remitente]["suerte"] += robo
                 respuesta_txt = f"💥 REPRESALIA LETAL CONFIRMADA. {robo} de suerte arrebatados al retador original."
 
             sala["estado"] = "JUEGO_EN_CURSO"
             sala["duelo_activo"] = None
+            
+            # Notificar a toda la sala el resultado del contraataque
+            socketio.start_background_task(notificar_sala, mi_sala, respuesta_txt)
+            
+            # Limpiar eliminados inmediatamente
+            limpiar_eliminados(mi_sala)
+            
             return responder(respuesta_txt)
 
     # 5. TRIBUNAL DE PURGA
@@ -506,9 +623,15 @@ def ejecutar_comando():
     ):
         mi_sala = jugadores[remitente]["sala"]
         sala = salas[mi_sala]
+
+        # El acusado no puede votar en su propio juicio
+        if remitente == sala["candidato"]:
+            return responder("❌ Operación rechazada. El acusado no tiene derecho a voto en su propio tribunal.")
+
         sala["votantes"][remitente] = arg_completo.lower()
 
-        faltan = len(sala["lista_circular"]) - len(sala["votantes"])
+        votantes_validos = [j for j in sala["lista_circular"] if j != sala["candidato"]]
+        faltan = len(votantes_validos) - len(sala["votantes"])
         if faltan > 0:
             return responder(f"Voto registrado. Faltan {faltan} firmas para proceder.")
         else:
@@ -516,12 +639,12 @@ def ejecutar_comando():
             acusado = sala["candidato"]
             respuesta_txt = ""
 
-            if votos_si <= len(sala["lista_circular"]) / 2:
+            if votos_si <= len(votantes_validos) / 2:
                 respuesta_txt = "Quórum insuficiente. Tribunal disuelto sin derramamiento de suerte."
             else:
                 if "joker" in jugadores[acusado]["identidad"]:
-                    robo = int(jugadores[acusado]["suerte"] * 0.5)
-                    jugadores[acusado]["suerte"] -= robo
+                    robo = max(0, int(jugadores[acusado]["suerte"] * 0.5))
+                    jugadores[acusado]["suerte"] = max(0, jugadores[acusado]["suerte"] - robo)
 
                     viejas_cartas = [
                         jugadores[j]["identidad"] for j in sala["lista_circular"]
@@ -552,13 +675,18 @@ def ejecutar_comando():
                     respuesta_txt = "⚠️ ERROR DE PURGA. Inocente condenado.\nImpuesto del 10% aplicado a todos los sujetos que votaron a favor."
                     for v_id, voto in sala["votantes"].items():
                         if voto == "si":
-                            jugadores[v_id]["suerte"] -= int(
-                                jugadores[v_id]["suerte"] * 0.1
-                            )
-
+                            deduccion = max(0, int(jugadores[v_id]["suerte"] * 0.1))
+                            jugadores[v_id]["suerte"] = max(0, jugadores[v_id]["suerte"] - deduccion)
             sala["estado"] = "JUEGO_EN_CURSO"
             sala["votantes"] = {}
             sala["candidato"] = None
+            
+            # Notificar a toda la sala de la resolución de la purga
+            socketio.start_background_task(notificar_sala, mi_sala, respuesta_txt)
+            
+            # Limpiar eliminados inmediatamente
+            limpiar_eliminados(mi_sala)
+            
             return responder(respuesta_txt)
 
     # 6. CIERRE Y VEREDICTO DE SOMBRAS
@@ -614,10 +742,11 @@ def ejecutar_comando():
             if voto_consenso == "ninguno":
                 # ── NINGUNO: todos pierden 10% de su suerte actual ──────────
                 for j in sala["lista_circular"]:
-                    jugadores[j]["suerte"] -= int(jugadores[j]["suerte"] * 0.10)
+                    deduccion = max(0, int(jugadores[j]["suerte"] * 0.10))
+                    jugadores[j]["suerte"] = max(0, jugadores[j]["suerte"] - deduccion)
                 respuesta_txt = "⚠️ CONSENSO: NINGUNO. El pozo se evapora. Todos los sujetos pierden el 10% de su suerte."
                 resultado_payload = {
-                    "tipo": "ninguno",
+                    "tipo": "ganador",
                     "ganador": "",
                     "mensaje": respuesta_txt,
                 }
@@ -670,28 +799,7 @@ def ejecutar_comando():
                     jugadores[j]["identidad"] = None
 
                 # Garbage collector
-                eliminados = []
-                sobrevivientes = []
-                for j in sala["lista_circular"]:
-                    if jugadores[j]["suerte"] <= 0:
-                        jugadores[j]["estado_vital"] = "Eliminado"
-                        jugadores[j]["sala"] = None
-                        eliminados.append(j)
-                    else:
-                        sobrevivientes.append(j)
-                sala["lista_circular"] = sobrevivientes
-
-                # Notify eliminated players
-                for e in eliminados:
-                    socketio.start_background_task(
-                        notificar_privado,
-                        e,
-                        "💀 PROTOCOLO DE EXTERMINIO EJECUTADO.\nSignos vitales (Suerte): 0.\nHas sido purgado del sistema y expulsado de la sala permanentemente.",
-                        resultado={
-                            "tipo": "eliminado",
-                            "mensaje": "Has sido eliminado del juego.",
-                        },
-                    )
+                limpiar_eliminados(mi_sala)
 
                 # Notify all survivors with resultado screen
                 socketio.start_background_task(
@@ -714,27 +822,7 @@ def ejecutar_comando():
             jugadores[j]["suerte"] = 0
 
         # Garbage collector — elimina a jugadores con suerte <= 0
-        eliminados = []
-        sobrevivientes = []
-        for j in sala["lista_circular"]:
-            if jugadores[j]["suerte"] <= 0:
-                jugadores[j]["estado_vital"] = "Eliminado"
-                jugadores[j]["sala"] = None
-                eliminados.append(j)
-            else:
-                sobrevivientes.append(j)
-        sala["lista_circular"] = sobrevivientes
-
-        for e in eliminados:
-            socketio.start_background_task(
-                notificar_privado,
-                e,
-                "💀 PROTOCOLO DE EXTERMINIO EJECUTADO.\nSignos vitales (Suerte): 0.\nHas sido purgado del sistema y expulsado de la sala permanentemente.",
-                resultado={
-                    "tipo": "eliminado",
-                    "mensaje": "Has sido eliminado del juego.",
-                },
-            )
+        limpiar_eliminados(mi_sala)
 
         # El pozo se evapora y la sala vuelve a LOBBY para nueva ronda
         sala["pozo_acumulado"] = 0
@@ -804,8 +892,8 @@ def ejecutar_comando():
             sala = salas[mi_sala]
             if remitente in sala["lista_circular"]:
                 if sala["estado"] != "LOBBY":
-                    multa = int(jugadores[remitente]["suerte"] * 0.5)
-                    jugadores[remitente]["suerte"] -= multa
+                    multa = max(0, int(jugadores[remitente]["suerte"] * 0.5))
+                    jugadores[remitente]["suerte"] = max(0, jugadores[remitente]["suerte"] - multa)
                     sala["pozo_acumulado"] += multa
                     jugadores[remitente]["estado_vital"] = "Retirado"
                     socketio.start_background_task(
@@ -828,6 +916,31 @@ def ejecutar_comando():
                             None,
                             remitente,
                         )
+                    elif len(sala["lista_circular"]) == 1:
+                        # Si solo queda 1 jugador, coronarlo ganador absoluto!
+                        ganador_unico = sala["lista_circular"][0]
+                        nombre_ganador = jugadores[ganador_unico]["nombre"]
+                        
+                        sala["pozo_acumulado"] = 0
+                        sala["turnos_jugados"] = 0
+                        sala["apuesta_maxima"] = 0
+                        sala["puntero_turno"] = 0
+                        sala["votantes"] = {}
+                        sala["estado"] = "LOBBY"
+                        jugadores[ganador_unico]["identidad"] = None
+                        
+                        msg_victoria = f"🏆 ¡EL SUJETO {nombre_ganador} ES EL ÚNICO SOBREVIVIENTE Y HA GANADO LA PARTIDA! 🏆"
+                        socketio.start_background_task(
+                            notificar_sala,
+                            mi_sala,
+                            msg_victoria,
+                            resultado={
+                                "tipo": "ganador",
+                                "ganador": nombre_ganador,
+                                "mensaje": msg_victoria
+                            }
+                        )
+
             jugadores[remitente]["sala"] = None
             return responder("Has abandonado la sala exitosamente.")
         return responder("No estás en ninguna sala.")

@@ -41,6 +41,42 @@
     For more details:
     * https://docs.flutter.dev/platform-integration/web/initialization
   -->
+  <!-- Motor de Audio del Juego Override -->
+  <script>
+    // Audio one-shot (efectos puntuales)
+    window.playSound = function(url) {
+      try {
+        var a = new Audio(url);
+        a.volume = 0.8;
+        var p = a.play();
+        if (p !== undefined) { p.catch(function(){}); }
+      } catch(e) {}
+    };
+
+    // Audio en bucle (votaciones, duelos)
+    var _loopAudio = null;
+    window.playLoop = function(url) {
+      window.stopLoop();
+      try {
+        _loopAudio = new Audio(url);
+        _loopAudio.loop = true;
+        _loopAudio.volume = 0.45;
+        var p = _loopAudio.play();
+        if (p !== undefined) { p.catch(function(){}); }
+      } catch(e) { _loopAudio = null; }
+    };
+
+    window.stopLoop = function() {
+      try {
+        if (_loopAudio) {
+          _loopAudio.pause();
+          _loopAudio.currentTime = 0;
+          _loopAudio = null;
+        }
+      } catch(e) {}
+    };
+  </script>
+
   <script src="flutter_bootstrap.js" async></script>
 </body>
 </html>

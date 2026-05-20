@@ -3,6 +3,7 @@ import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 import 'dart:convert';
 import 'dart:ui';
+import 'dart:js' as js;
 import 'package:socket_io_client/socket_io_client.dart' as IO;
 
 enum FaseApp { login, lobby, sala }
@@ -73,6 +74,35 @@ class _GestorPantallasState extends State<GestorPantallas> {
   String _acusado = "";
   bool _haAtacado = false;
 
+  // --- SISTEMA DE AUDIO (via JS interop) ---
+  void _reproducirSonido(String asset) {
+    try {
+      js.context.callMethod('playSound', [asset]);
+    } catch (e) {}
+  }
+
+  void _iniciarBucle(String asset) {
+    try {
+      js.context.callMethod('playLoop', [asset]);
+    } catch (e) {}
+  }
+
+  void _detenerBucle() {
+    try {
+      js.context.callMethod('stopLoop', []);
+    } catch (e) {}
+  }
+
+  /// Actualiza el estado de sonido ambiental según el estado de sala
+  void _actualizarAudioEstado(String nuevoEstado) {
+    final estadosConVotacion = ['JUICIO', 'VEREDICTO', 'CONTRAATAQUE'];
+    if (estadosConVotacion.contains(nuevoEstado) && !estadosConVotacion.contains(_estadoSala)) {
+      _iniciarBucle('sound/votaciones.mp3');
+    } else if (!estadosConVotacion.contains(nuevoEstado) && estadosConVotacion.contains(_estadoSala)) {
+      _detenerBucle();
+    }
+  }
+
   // Fases Locales Visuales (Caja Central)
   String _interfazLocal = "base";
   String _tempObjetivo = "";
@@ -92,11 +122,18 @@ class _GestorPantallasState extends State<GestorPantallas> {
 
   void _procesarEstadoJson(Map<String, dynamic>? data) {
     if (data == null) return;
-    if (data.containsKey('game_state')) {
+    if (data.containsKey('game_state') && data['game_state'] != null) {
       final gs = data['game_state'];
       _pozo = gs['pozo'] ?? 0;
       _apuestaMaxima = gs['apuesta_maxima'] ?? 0;
-      _estadoSala = gs['estado'] ?? "";
+      final nuevoEstado = gs['estado'] ?? "";
+
+      // Detectar transición de estado para audio ambiental
+      if (nuevoEstado != _estadoSala) {
+        _actualizarAudioEstado(nuevoEstado);
+      }
+
+      _estadoSala = nuevoEstado;
       _turnoPerteneciente = gs['turno_de'] ?? "";
       _suerte = gs['suerte'] ?? 0;
       _urlCartaPropia = gs['url_imagen'];
@@ -146,6 +183,18 @@ class _GestorPantallasState extends State<GestorPantallas> {
 
   Future<void> enviarComandoSala(String comando) async {
     if (comando.isEmpty) return;
+
+    // Disparar sonido según el comando ANTES de enviarlo al servidor
+    final partes = comando.split(' ');
+    final cmd = partes.isNotEmpty ? partes[0] : '';
+    if (cmd == '!repartir') {
+      _reproducirSonido('sound/repartir.mp3');
+    } else if (cmd == '!apostar' || cmd == '!igualar') {
+      _reproducirSonido('sound/apostar-igualar.mp3');
+    } else if (cmd == '!retirarse') {
+      _reproducirSonido('sound/retirada.mp3');
+    }
+
     try {
       final response = await http.post(
         Uri.parse('$serverUrl/api/comando'),
@@ -154,9 +203,41 @@ class _GestorPantallasState extends State<GestorPantallas> {
       );
       if (response.statusCode == 200) {
         final data = jsonDecode(response.body);
+        final msg = (data['message'] ?? '') as String;
+
+        // Sonido de apuesta inválida (rechazo del servidor)
+        if ((cmd == '!apostar' || cmd == '!igualar') &&
+            (msg.contains('rechazada') || msg.contains('Operación rechazada') ||
+             msg.contains('denegada') || msg.contains('No posees') ||
+             msg.contains('bloqueada') || msg.contains('Infracción'))) {
+          _reproducirSonido('sound/mal.mp3');
+        }
+
+        // Pillado: duelo exitoso o acusación exitosa
+        final esExtraccion = msg.contains('EXTRACCIÓN EXITOSA') || msg.contains('REPRESALIA LETAL');
+        final esPillado = msg.contains('PARÁSITO EXPUESTO') || esExtraccion;
+        if (esPillado) {
+          _reproducirSonido('sound/pillado.mp3');
+        }
+
+        // Fallido: fallo en duelo (carta incorrecta) o inocente condenado en acusación
+        final esFallido = msg.contains('Fallo balístico') ||
+            msg.contains('Contraataque fallido') ||
+            msg.contains('ERROR DE PURGA');
+        if (esFallido) {
+          _reproducirSonido('sound/fallido.mp3');
+        }
+
+        // Ganador confirmado en respuesta propia
+        final esGanador = msg.contains('CONSENSO ALCANZADO') || msg.contains('ÚNICO SOBREVIVIENTE');
+        if (esGanador) {
+          _detenerBucle();
+          _reproducirSonido('sound/winner.mp3');
+        }
+
         setState(() {
           _procesarEstadoJson(data);
-          _interfazLocal = "base"; // Reset gui after issuing order
+          _interfazLocal = "base";
         });
       }
     } catch (_) {}
@@ -173,12 +254,92 @@ class _GestorPantallasState extends State<GestorPantallas> {
     );
     socket!.on('notificacion', (data) {
       if (mounted && faseActual == FaseApp.sala) {
+        // Detectar sonidos en notificaciones del servidor (eventos ajenos al cliente local)
+        final mensaje = (data['mensaje'] ?? '') as String;
+
+        final esExtraccionAjena = mensaje.contains('EXTRACCIÓN EXITOSA') ||
+            mensaje.contains('REPRESALIA LETAL') ||
+            mensaje.contains('PARÁSITO EXPUESTO');
+        if (esExtraccionAjena) {
+          _reproducirSonido('sound/pillado.mp3');
+        }
+
+        // Fallido ajeno: duelo fallido o inocente condenado
+        final esFallidoAjeno = mensaje.contains('Fallo balístico') ||
+            mensaje.contains('Contraataque fallido') ||
+            mensaje.contains('ERROR DE PURGA');
+        if (esFallidoAjeno) {
+          _reproducirSonido('sound/fallido.mp3');
+        }
+
+        // Ganador por notificación (único sobreviviente o consenso)
+        final esGanadorAjeno = mensaje.contains('CONSENSO ALCANZADO') ||
+            mensaje.contains('ÚNICO SOBREVIVIENTE');
+        if (esGanadorAjeno) {
+          _detenerBucle();
+          _reproducirSonido('sound/winner.mp3');
+        }
+
+        // Retirada de otro jugador
+        if (mensaje.contains('huyó acobardado') || mensaje.contains('huyó en plena ronda')) {
+          _reproducirSonido('sound/retirada.mp3');
+        }
+
         setState(() {
           if (data['imagen'] != null && _urlCartaPropia == null) {
             _urlCartaPropia = data['imagen'];
           }
           _procesarEstadoJson(data);
         });
+
+        // Si el sujeto fue eliminado, expulsarlo de la sala de inmediato al lobby
+        if (data['resultado'] != null && data['resultado']['tipo'] == 'eliminado') {
+          _detenerBucle();
+          final msg = data['resultado']['mensaje'] ?? 'Has sido eliminado por quedarte sin suerte.';
+          WidgetsBinding.instance.addPostFrameCallback((_) {
+            if (mounted) {
+              showDialog(
+                context: context,
+                barrierDismissible: false,
+                builder: (_) => AlertDialog(
+                  backgroundColor: const Color(0xFF18181B),
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(24)),
+                  title: const Row(
+                    children: [
+                      Icon(Icons.dangerous, color: Colors.redAccent, size: 28),
+                      SizedBox(width: 10),
+                      Text(
+                        '💀 ELIMINADO',
+                        style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16),
+                      ),
+                    ],
+                  ),
+                  content: Text(msg, style: const TextStyle(color: Colors.white70, fontSize: 14)),
+                  actions: [
+                    ElevatedButton(
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: const Color(0xFFEF4444),
+                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                      ),
+                      onPressed: () {
+                        Navigator.pop(context);
+                        if (mounted) {
+                          setState(() {
+                            faseActual = FaseApp.lobby;
+                            _urlCartaPropia = null;
+                          });
+                        }
+                      },
+                      child: const Text('VOLVER AL LOBBY'),
+                    ),
+                  ],
+                ),
+              );
+            }
+          });
+          return;
+        }
+
         // Mostrar dialog de resultado si llegó
         if (_resultadoPendiente != null && mounted) {
           final r = _resultadoPendiente!;
@@ -197,6 +358,12 @@ class _GestorPantallasState extends State<GestorPantallas> {
     final mensaje = r['mensaje'] ?? '';
     final esGanador = tipo == 'ganador';
     final esFraude = tipo == 'fraude';
+
+    // Sonido de ganador al mostrar el diálogo
+    if (esGanador) {
+      _detenerBucle();
+      _reproducirSonido('sound/winner.mp3');
+    }
     showDialog(
       context: context,
       barrierDismissible: false,
@@ -227,7 +394,7 @@ class _GestorPantallasState extends State<GestorPantallas> {
               shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
             ),
             onPressed: () => Navigator.pop(context),
-            child: const Text('CONTINUAR'),
+            child: const Text('ACEPTAR'),
           ),
         ],
       ),
@@ -254,6 +421,7 @@ class _GestorPantallasState extends State<GestorPantallas> {
     final res = await enviarPeticion("!unirme $miNombre");
     if (res != null &&
         (res.contains("registrado") || res.contains("ya posee"))) {
+      _reproducirSonido('sound/login.mp3');
       setState(() {
         faseActual = FaseApp.lobby;
       });
@@ -267,6 +435,7 @@ class _GestorPantallasState extends State<GestorPantallas> {
     if (nombreSala.trim().isEmpty) return;
     final res = await enviarPeticion("!crearsala $nombreSala");
     if (res != null && res.contains("inicializada")) {
+      _reproducirSonido('sound/entrada.mp3');
       setState(() {
         esAnfitrion = true;
         faseActual = FaseApp.sala;
@@ -280,6 +449,7 @@ class _GestorPantallasState extends State<GestorPantallas> {
     if (nombreSala.trim().isEmpty) return;
     final res = await enviarPeticion("!unirsala $nombreSala");
     if (res != null && res.contains("Inyección exitosa")) {
+      _reproducirSonido('sound/entrada.mp3');
       setState(() {
         esAnfitrion = false;
         faseActual = FaseApp.sala;
@@ -330,7 +500,7 @@ class _GestorPantallasState extends State<GestorPantallas> {
     );
   }
 
-  Widget _buildListadoCartas(String titulo, Function(String) onSelect) {
+  Widget _buildListadoCartas(String titulo, Function(String) onSelect, {bool ocultarJokers = false}) {
     return Column(
       children: [
         Padding(
@@ -352,7 +522,9 @@ class _GestorPantallasState extends State<GestorPantallas> {
             crossAxisSpacing: 10,
             mainAxisSpacing: 10,
             padding: const EdgeInsets.all(10),
-            children: _nombresCartas.entries.map((enf) {
+            children: _nombresCartas.entries
+                .where((enf) => !ocultarJokers || !enf.key.contains("joker"))
+                .map((enf) {
               return OutlinedButton(
                 style: OutlinedButton.styleFrom(
                   side: const BorderSide(color: Colors.orangeAccent),
@@ -380,6 +552,7 @@ class _GestorPantallasState extends State<GestorPantallas> {
   Widget _buildTapeteDinamico() {
     // ESTADOS DEL SERVIDOR:
     if (_estadoSala == "JUICIO") {
+      bool soyAcusado = (_acusado.toUpperCase() == miNombre.toUpperCase());
       return Center(
         child: Column(
           mainAxisSize: MainAxisSize.min,
@@ -387,7 +560,9 @@ class _GestorPantallasState extends State<GestorPantallas> {
             const Icon(Icons.gavel, size: 80, color: Colors.redAccent),
             const SizedBox(height: 20),
             Text(
-              "⚖️ VOTACIÓN DE PURGA EN CONTRA DE:\n\n${_acusado.toUpperCase()}",
+              soyAcusado
+                  ? "⚖️ ESTÁS SIENDO ACUSADO EN EL TRIBUNAL"
+                  : "⚖️ VOTACIÓN DE PURGA EN CONTRA DE:\n\n${_acusado.toUpperCase()}",
               textAlign: TextAlign.center,
               style: const TextStyle(
                 fontSize: 18,
@@ -396,45 +571,65 @@ class _GestorPantallasState extends State<GestorPantallas> {
               ),
             ),
             const SizedBox(height: 40),
-            Row(
-              mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-              children: [
-                ElevatedButton(
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: Colors.red.shade900,
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 40,
-                      vertical: 20,
-                    ),
-                  ),
-                  onPressed: () => enviarComandoSala("!votar si"),
-                  child: const Text(
-                    "SÍ (EXPULSAR)",
-                    style: TextStyle(
-                      fontWeight: FontWeight.bold,
-                      color: Colors.white,
-                    ),
+            if (soyAcusado)
+              Container(
+                padding: const EdgeInsets.all(20),
+                decoration: BoxDecoration(
+                  color: Colors.red.withOpacity(0.1),
+                  borderRadius: BorderRadius.circular(16),
+                  border: Border.all(color: Colors.redAccent.withOpacity(0.5)),
+                ),
+                child: const Text(
+                  "ESTÁS BAJO INVESTIGACIÓN\nEl resto de la mesa decidirá tu destino. No tienes derecho a voto.",
+                  textAlign: TextAlign.center,
+                  style: TextStyle(
+                    color: Colors.redAccent,
+                    fontSize: 14,
+                    height: 1.5,
+                    fontWeight: FontWeight.bold,
                   ),
                 ),
-                ElevatedButton(
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: Colors.blueGrey,
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 40,
-                      vertical: 20,
+              )
+            else
+              Row(
+                mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                children: [
+                  ElevatedButton(
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: Colors.red.shade900,
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 40,
+                        vertical: 20,
+                      ),
+                    ),
+                    onPressed: () => enviarComandoSala("!votar si"),
+                    child: const Text(
+                      "SÍ (EXPULSAR)",
+                      style: TextStyle(
+                        fontWeight: FontWeight.bold,
+                        color: Colors.white,
+                      ),
                     ),
                   ),
-                  onPressed: () => enviarComandoSala("!votar no"),
-                  child: const Text(
-                    "NO",
-                    style: TextStyle(
-                      fontWeight: FontWeight.bold,
-                      color: Colors.white,
+                  ElevatedButton(
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: Colors.blueGrey,
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 40,
+                        vertical: 20,
+                      ),
+                    ),
+                    onPressed: () => enviarComandoSala("!votar no"),
+                    child: const Text(
+                      "NO",
+                      style: TextStyle(
+                        fontWeight: FontWeight.bold,
+                        color: Colors.white,
+                      ),
                     ),
                   ),
-                ),
-              ],
-            ),
+                ],
+              ),
           ],
         ),
       );
@@ -482,6 +677,7 @@ class _GestorPantallasState extends State<GestorPantallas> {
       return _buildListadoCartas(
         "¿QUÉ IDENTIDAD POSEE $_tempObjetivo?",
         (carta) => enviarComandoSala("!duelo $_tempObjetivo $carta"),
+        ocultarJokers: true,
       );
     }
 

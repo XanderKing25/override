@@ -1,22 +1,23 @@
 @echo off
 echo Iniciando protocolo de despliegue del sistema...
 
-:: Consola 1 (Server)
-echo Levantando servidor central...
-start "server" cmd /k ".\venv\Scripts\activate && python logica.py"
+:: Consola 1 (Server Backend Flask)
+echo Levantando servidor central (Flask) en puerto 5000...
+start "server" cmd /c ".\venv\Scripts\activate && python logica.py"
 
-:: Consolas de Clientes Flutter
-echo Desplegando cliente d1...
-start "d1" cmd /k "cd /d %~dp0override_app && flutter run -d edge"
+:: Consola 2 (Static Web Server)
+echo Levantando servidor web estatico (Python) en puerto 8080...
+start "static-server" cmd /c "python -m http.server 8080 --directory override_app/build/web"
 
-echo Desplegando cliente d2...
-start "d2" cmd /k "cd /d %~dp0override_app && flutter run -d edge"
+:: Esperar a que los servidores se levanten (usamos ping para evitar errores de redirección)
+ping -n 3 127.0.0.1 >nul
 
-echo Desplegando cliente d3...
-start "d3" cmd /k "cd /d %~dp0override_app && flutter run -d edge"
+:: Abrir 4 pestañas en el mismo navegador Edge apuntando al cliente web
+echo Desplegando 4 instancias del cliente en Microsoft Edge...
+start msedge "http://localhost:8080"
+start msedge "http://localhost:8080"
+start msedge "http://localhost:8080"
+start msedge "http://localhost:8080"
 
-echo Desplegando cliente d4...
-start "d4" cmd /k "cd /d %~dp0override_app && flutter run -d edge"
-
-echo Todas las instancias han sido inyectadas.
+echo Todas las instancias han sido inyectadas y desplegadas.
 exit
